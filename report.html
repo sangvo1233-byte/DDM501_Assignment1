@@ -126,7 +126,9 @@ direct user access to the model.</p>
   <tr><th style="width:17%">Aspect</th><th>Requirement</th></tr>
   <tr><td>Sources</td><td>Core banking: limits, six months of repayment status, statements and payments. Application form: demographics. CIC bureau: external delinquency flags. Outcome labels: whether the customer defaulted in the following month.</td></tr>
   <tr><td>Quality</td><td>A three-level validation gate runs before every training run. <i>Schema:</i> all 23 feature columns plus the target are present and numeric. <i>Statistics:</i> at least 5,000 rows, at most 2% missing per column, target rate between 5% and 60%. <i>Semantics:</i> categorical codes are valid, age is 18–100, repayment status is −2 to 8, and no payment is negative. Duplicate customer-month records are removed.</td></tr>
-  <tr><td>Privacy</td><td>Customer consent for credit scoring is recorded at application. Direct identifiers (name, national ID, phone) never enter the ML system, and records are keyed by a salted hash. Sex and age are used only for <b>fairness monitoring</b>, as a matter of policy. Access is logged and data minimisation is applied, as required by Decree 13/2023/ND-CP.</td></tr>
+  <tr><td>Privacy</td><td>Customer consent for credit scoring is recorded at application. Direct identifiers (name, national ID, phone) never enter the ML system, and records are keyed by a salted hash. <b>Sex and age:</b> the prototype follows the UCI schema and uses both as model inputs. For production, the
+target policy is to <i>drop sex as an input</i> (and review age with compliance) while keeping both for
+<b>fairness monitoring</b>. This is a design decision still to be validated, not a measured result. Access is logged and data minimisation is applied, as required by Decree 13/2023/ND-CP.</td></tr>
   <tr><td>Volume</td><td>History of about 1.2 million account-months (roughly 300 MB as Parquet), growing by about 130,000 applications per month. The prototype uses 30,000 rows × 24 columns.</td></tr>
   <tr><td>Labelling</td><td>The label delay is 30–60 days. Declined applicants never produce a label (selective labels), which is noted as a bias risk (Section 5).</td></tr>
 </table>
@@ -144,7 +146,7 @@ leading indicators are monitored as well.</p>
   <tr><td rowspan="3"><b>System</b></td><td>Fast, available service</td><td>p95 latency, availability</td><td>≤ 100 ms; ≥ 99.9%</td></tr>
   <tr><td>Stable behaviour in production</td><td>Maximum feature PSI; DECLINE share</td><td>PSI &lt; 0.10 stable, ≥ 0.25 act; DECLINE share ≤ 20%</td></tr>
   <tr><td>Safe releases</td><td>Share of models promoted only through the gate; rollback time</td><td>100%; &lt; 5 min</td></tr>
-  <tr><td rowspan="4"><b>Model</b></td><td>Rank risk well (primary)</td><td>ROC AUC on a held-out time-split</td><td>≥ 0.70 gate; target ≥ 0.75</td></tr>
+  <tr><td rowspan="4"><b>Model</b></td><td>Rank risk well (primary)</td><td>ROC AUC on a held-out split (prototype: stratified random 20%; production: out-of-time, the latest month)</td><td>≥ 0.70 gate; target ≥ 0.75</td></tr>
   <tr><td>Find defaulters in an imbalanced population</td><td>PR AUC; recall at the review threshold of 0.30</td><td>PR AUC ≥ 0.45; recall ≥ 0.50</td></tr>
   <tr><td>Trustworthy probabilities</td><td>Brier score, calibration curve</td><td>Brier ≤ 0.15</td></tr>
   <tr><td>Fair treatment</td><td>Selection-rate gap between sexes at threshold 0.30</td><td>≤ 0.10 (hard gate)</td></tr>
@@ -237,9 +239,9 @@ is rejected.</p>
 <h3>4.2 Component description</h3>
 <table>
   <tr><th style="width:20%">Component</th><th>Purpose and responsibility</th><th style="width:27%">Technologies considered (chosen in bold)</th></tr>
-  <tr><td>Data ingestion</td><td>Extract a dated, immutable snapshot of the training table; make the train/test split reproducible (seeded and stratified).</td><td><b>Python/pandas + Parquet</b>; Spark if volume grows; DVC for snapshot versioning</td></tr>
+  <tr><td>Data ingestion</td><td>Extract a dated, immutable snapshot of the training table; use a seeded, stratified split for the prototype and hold out the latest month in production.</td><td><b>Python/pandas + Parquet</b>; Spark if volume grows; DVC for snapshot versioning</td></tr>
   <tr><td>Data validation</td><td>Block training on broken data; attach the validation report to every run.</td><td><b>Custom three-level checks</b>; Great Expectations / Pandera as alternatives</td></tr>
-  <tr><td>Feature engineering</td><td>Domain ratios and counts <i>inside</i> the sklearn Pipeline, so that training and serving share one code path and cannot skew.</td><td><b>scikit-learn Pipeline + ColumnTransformer</b>; a feature store (Feast) is not needed yet</td></tr>
+  <tr><td>Feature engineering</td><td>Domain ratios and counts <i>inside</i> the sklearn Pipeline, so that training and serving share one code path and cannot skew. (Design target: the Lab 2 prototype derives the features in a shared function called before the Pipeline, and the Lab 4 service folds the derivation into the Pipeline.)</td><td><b>scikit-learn Pipeline + ColumnTransformer</b>; a feature store (Feast) is not needed yet</td></tr>
   <tr><td>Training and tracking</td><td>Fit candidate models and log parameters, data summary, artifacts and environment.</td><td><b>scikit-learn (LogReg, RF, HistGradientBoosting)</b>, <b>MLflow</b>; XGBoost/LightGBM as options</td></tr>
   <tr><td>Evaluation and gate</td><td>Compute aggregate and per-group metrics; apply the written promotion rule automatically.</td><td><b>Custom module</b> with thresholds held in config</td></tr>
   <tr><td>Model registry</td><td>Version models; the aliases <code>@champion</code> and <code>@challenger</code> decide what is served.</td><td><b>MLflow Model Registry</b> (aliases, not the deprecated stages)</td></tr>
@@ -296,8 +298,10 @@ when it is down.</p>
 <h3>5.5 Privacy vs personalisation</h3>
 <p>Adding more personal data, such as phone metadata, social data or precise location, would probably improve AUC
 but raises consent, legal and fairness risks under Decree 13/2023/ND-CP. <b>Decision:</b> use only
-credit-relevant behavioural data that was collected with consent. Sensitive attributes (sex, age) are held for
-<i>monitoring</i> fairness, and whether to drop them as model inputs is reviewed with compliance. Identifiers are
+credit-relevant behavioural data that was collected with consent. Sensitive attributes (sex, age) are always kept for
+<i>monitoring</i> fairness. The prototype still uses them as inputs, because it follows the UCI schema. Removing
+sex before production, and retraining to measure the AUC cost against the change in the fairness gap, is a planned
+step reviewed with compliance, not something already done. Identifiers are
 hashed, and personal data never leaves the country. The model's AUC is accepted as the price of a defensible
 feature set.</p>
 
