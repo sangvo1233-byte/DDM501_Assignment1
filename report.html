@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>DDM501 Assignment 1 — ML System Design Document</title>
+<link rel="stylesheet" href="../_report_style.css">
+</head>
+<body>
+
+<div class="cover">
+  <h1>ML System Design Document</h1>
+  <div style="font-size:13pt;margin-bottom:6pt">Credit Default Risk Scoring for Consumer Credit Card Origination</div>
+  <table class="meta">
+    <tr><td>Course</td><td>DDM501 — AI in DevOps, DataOps, MLOps</td></tr>
+    <tr><td>Assignment</td><td>Individual Assignment 1 (5%)</td></tr>
+    <tr><td>Student</td><td>Võ Minh Sang — 25MS13286</td></tr>
+  </table>
+</div>
+
+<div class="note">
+<b>Summary.</b> A Vietnamese consumer finance company approves credit cards with a manual scorecard and a large team of
+underwriters. This document designs an ML system that estimates each applicant's probability of missing the next
+payment and turns it into one of three underwriting actions: APPROVE, REVIEW or DECLINE. The design covers
+requirements, a hierarchy of goals and metrics, the architecture and pipeline, and five design trade-offs. The
+feasibility figures come from a prototype trained on a dataset with the UCI "Default of Credit Card Clients" schema
+(30,000 customers, 23 features, 23.3% default rate). This dataset stands in for the company's own records, which are
+hypothetical.
+</div>
+
+<h2>1. Problem Definition</h2>
+
+<h3>1.1 Context and background</h3>
+<p>The organisation is a mid-sized consumer finance company in Vietnam. It issues unsecured credit cards to salaried
+customers, mostly first-time borrowers aged 22–40. It receives about 6,000 card applications per business day through a
+mobile app, a partner network of electronics retailers and branch offices. Unsecured consumer credit is a high-margin,
+high-loss business. The portfolio's 90-day delinquency rate is around 6–8%. Charge-offs are the largest cost line after
+funding, so a small improvement in who gets approved has a large effect on profit.</p>
+
+<h3>1.2 Problem statement</h3>
+<p>The current process cannot reliably tell customers who will repay apart from customers who will not. It is also too
+slow and too expensive to scale. In measurable terms:</p>
+<ul>
+  <li><b>Loss:</b> about 22–23% of approved accounts miss at least one payment within the observation window. The current
+  scorecard ranks risk with an estimated ROC AUC of about 0.68.</li>
+  <li><b>Cost and speed:</b> about 35% of applications go to manual review, and the median time to a decision is
+  26 hours. Partners at the retail point of sale need an answer in under a minute, or the customer walks away.</li>
+  <li><b>Consistency:</b> two underwriters looking at the same file agree only about 80% of the time. Decisions cannot be
+  explained consistently to customers or to the regulator.</li>
+</ul>
+<p>The goal is a service that returns a calibrated default probability and a decision in real time. It should reduce
+credit losses and manual workload without increasing unfair treatment between customer groups.</p>
+
+<h3>1.3 Current situation</h3>
+<p>Today a rule-based scorecard assigns points for age, income band, employment type and a credit bureau (CIC) flag. Any
+application that scores between two cut-offs, or that has an adverse CIC record, goes to an underwriter. The rules were
+last recalibrated two years ago. Nobody measures their performance systematically, and they use none of the behavioural
+data the company already holds for existing customers: repayment status, statement amounts and payments over the last
+six months.</p>
+
+<h3>1.4 Why machine learning</h3>
+<ul>
+  <li>Risk depends on <b>non-linear interactions</b>, for example credit utilisation combined with a recent payment delay.
+  Hand-written rules capture these poorly, but gradient-boosted trees and regularised logistic regression with
+  engineered ratios learn them from data.</li>
+  <li><b>Labelled history exists</b>, and every month of operation produces more of it. Each account eventually shows
+  whether it defaulted, so the problem is standard supervised binary classification.</li>
+  <li>The decision is <b>high-volume and repetitive</b>. The value lies in consistency and speed, which automated scoring
+  provides and manual review does not.</li>
+  <li>The environment <b>changes</b>, through marketing campaigns, the economic cycle and new partner channels. A model can
+  be retrained and monitored for drift. A static scorecard silently decays.</li>
+</ul>
+
+<h3>1.5 Stakeholders</h3>
+<table>
+  <tr><th style="width:22%">Stakeholder</th><th>Goals</th><th>Concerns</th></tr>
+  <tr><td>Applicants (end users)</td><td>A fast decision and fair treatment</td><td>Wrongful decline, opaque reasons, privacy of personal data</td></tr>
+  <tr><td>Risk management / CRO (business owner)</td><td>Lower credit losses at the same approval volume</td><td>Model risk, auditability, stability of the approval rate</td></tr>
+  <tr><td>Underwriting operations</td><td>A manageable review queue with good explanations</td><td>A sudden spike in REVIEW volume; cases arriving without supporting information</td></tr>
+  <tr><td>Sales and retail partners</td><td>High approval rate, instant answers at point of sale</td><td>Latency and downtime directly lose sales</td></tr>
+  <tr><td>Data science team</td><td>Accurate, reproducible models that can be improved</td><td>Label delay, data quality, training–serving skew</td></tr>
+  <tr><td>ML / platform engineering</td><td>A reliable, observable, easily deployed service</td><td>On-call load, rollback, dependency drift</td></tr>
+  <tr><td>Compliance and legal</td><td>Adherence to SBV lending rules and Decree 13/2023/ND-CP on personal data protection</td><td>Discrimination by sex or age, consent for data use, adverse-action explanations</td></tr>
+</table>
+
+<h2>2. Requirements Analysis</h2>
+
+<h3>2.1 Functional requirements</h3>
+<table>
+  <tr><th style="width:8%">ID</th><th>Requirement</th></tr>
+  <tr><td>FR1</td><td><b>Core ML function:</b> estimate the probability that an applicant defaults on the next payment (binary classification, calibrated output in [0, 1]).</td></tr>
+  <tr><td>FR2</td><td>Map the probability to an action using two thresholds held in configuration, not in code: &lt; 0.30 → LOW/APPROVE; 0.30–0.60 → MEDIUM/REVIEW; ≥ 0.60 → HIGH/DECLINE.</td></tr>
+  <tr><td>FR3</td><td>Provide a single-application endpoint (<code>POST /predict</code>) and a batch endpoint of up to 500 applications (<code>POST /predict/batch</code>) for nightly portfolio re-scoring and credit-limit reviews.</td></tr>
+  <tr><td>FR4</td><td>Return the top factors behind each decision (<code>POST /explain</code>, SHAP), used for underwriter review and adverse-action notices.</td></tr>
+  <tr><td>FR5</td><td>Expose <code>/health</code> and <code>/model/info</code>, the latter giving the model version, training date, metrics and the thresholds in force.</td></tr>
+  <tr><td>FR6</td><td>Reject malformed input at the edge with HTTP 422, for example an unknown education code, age outside 18–100 or a negative payment.</td></tr>
+  <tr><td>FR7</td><td>Log every request's features, score, decision and model version to support monitoring, audit and future labelling.</td></tr>
+</table>
+
+<p><b>Input/output specification.</b> The input is one JSON application with credit limit, demographics (sex,
+education, marital status, age) and three lists of six monthly values: repayment status (−2 to 8), statement amount
+and amount paid. The output is <code>{default_probability, risk_band, decision, review_threshold, decline_threshold,
+model_version}</code>. Both contracts are enforced by Pydantic schemas and published as OpenAPI.</p>
+
+<p><b>Integration.</b> The loan origination system (LOS) calls the scoring API synchronously over the internal network.
+Feature data for existing customers comes from the core banking system. Bureau data comes from the CIC gateway, and the
+LOS merges it before calling. Decisions and scores are written back to the LOS. Outcomes (default or no default) arrive
+from core banking 30–60 days later and are joined to the prediction log to create new training labels.</p>
+
+<p><b>User interaction.</b> Applicants see only the decision. Underwriters see the score, the risk band and the top
+explanatory factors in the review screen. Risk managers see monitoring dashboards and model reports. There is no
+direct user access to the model.</p>
+
+<h3>2.2 Non-functional requirements</h3>
+<table>
+  <tr><th style="width:17%">Category</th><th>Requirement</th></tr>
+  <tr><td>Performance</td><td>p95 latency ≤ 100 ms and p99 ≤ 250 ms for <code>/predict</code>; batch of 500 ≤ 2 s; <code>/explain</code> p95 ≤ 1 s.</td></tr>
+  <tr><td>Throughput / load</td><td>Average about 0.2 requests/s (6,000 applications over a 9-hour day). Peak about 20 requests/s during promotions, plus nightly batch re-scoring of about 400,000 existing accounts in under one hour.</td></tr>
+  <tr><td>Scalability</td><td>A stateless API in containers scales horizontally behind a load balancer (Kubernetes HPA on CPU and request rate, 2–6 replicas). The model is loaded read-only at startup, so replicas are identical.</td></tr>
+  <tr><td>Reliability</td><td>99.9% monthly availability during business hours. Health checks verify that the model is loaded, not only that the process is alive. <b>Graceful degradation:</b> if the model is unavailable, the LOS falls back to the legacy scorecard and routes the case to REVIEW, never to an automatic approval. Rolling deployments allow instant rollback to the previous image and model version.</td></tr>
+  <tr><td>Maintainability</td><td>Scheduled monthly retraining, plus retraining triggered when drift is significant. Every model is versioned in a registry, and only one that passes a quality gate is promoted. Monitoring covers input drift (PSI), score distribution, decision mix, fairness gap and the four golden signals.</td></tr>
+  <tr><td>Security and privacy</td><td>TLS inside the network, no personal identifiers in the feature payload, role-based access to logs, data kept in-country, logs retained for 5 years for audit.</td></tr>
+</table>
+
+<h3>2.3 Data requirements</h3>
+<table>
+  <tr><th style="width:17%">Aspect</th><th>Requirement</th></tr>
+  <tr><td>Sources</td><td>Core banking: limits, six months of repayment status, statements and payments. Application form: demographics. CIC bureau: external delinquency flags. Outcome labels: whether the customer defaulted in the following month.</td></tr>
+  <tr><td>Quality</td><td>A three-level validation gate runs before every training run. <i>Schema:</i> all 23 feature columns plus the target are present and numeric. <i>Statistics:</i> at least 5,000 rows, at most 2% missing per column, target rate between 5% and 60%. <i>Semantics:</i> categorical codes are valid, age is 18–100, repayment status is −2 to 8, and no payment is negative. Duplicate customer-month records are removed.</td></tr>
+  <tr><td>Privacy</td><td>Customer consent for credit scoring is recorded at application. Direct identifiers (name, national ID, phone) never enter the ML system, and records are keyed by a salted hash. Sex and age are used only for <b>fairness monitoring</b>, as a matter of policy. Access is logged and data minimisation is applied, as required by Decree 13/2023/ND-CP.</td></tr>
+  <tr><td>Volume</td><td>History of about 1.2 million account-months (roughly 300 MB as Parquet), growing by about 130,000 applications per month. The prototype uses 30,000 rows × 24 columns.</td></tr>
+  <tr><td>Labelling</td><td>The label delay is 30–60 days. Declined applicants never produce a label (selective labels), which is noted as a bias risk (Section 5).</td></tr>
+</table>
+
+<h2>3. Goals and Metrics</h2>
+<p>The goals form a hierarchy. Each model metric is chosen because it moves a system goal, and each system goal
+supports a business goal. Model metrics can be computed offline today. Business metrics lag by 1–3 months, which is why
+leading indicators are monitored as well.</p>
+
+<table>
+  <tr><th style="width:12%">Level</th><th style="width:33%">Goal</th><th>Metric</th><th style="width:22%">Target / threshold</th></tr>
+  <tr><td rowspan="3"><b>Business</b></td><td>Reduce credit losses</td><td>Default rate of approved accounts at 3 months</td><td>−15% relative to the scorecard at equal approval rate</td></tr>
+  <tr><td>Reduce operating cost</td><td>Share of applications sent to manual review</td><td>From 35% to ≤ 20%</td></tr>
+  <tr><td>Grow approved volume</td><td>Point-of-sale decision time and approval rate</td><td>Decision &lt; 1 min; approval rate not below the current level</td></tr>
+  <tr><td rowspan="3"><b>System</b></td><td>Fast, available service</td><td>p95 latency, availability</td><td>≤ 100 ms; ≥ 99.9%</td></tr>
+  <tr><td>Stable behaviour in production</td><td>Maximum feature PSI; DECLINE share</td><td>PSI &lt; 0.10 stable, ≥ 0.25 act; DECLINE share ≤ 20%</td></tr>
+  <tr><td>Safe releases</td><td>Share of models promoted only through the gate; rollback time</td><td>100%; &lt; 5 min</td></tr>
+  <tr><td rowspan="4"><b>Model</b></td><td>Rank risk well (primary)</td><td>ROC AUC on a held-out time-split</td><td>≥ 0.70 gate; target ≥ 0.75</td></tr>
+  <tr><td>Find defaulters in an imbalanced population</td><td>PR AUC; recall at the review threshold of 0.30</td><td>PR AUC ≥ 0.45; recall ≥ 0.50</td></tr>
+  <tr><td>Trustworthy probabilities</td><td>Brier score, calibration curve</td><td>Brier ≤ 0.15</td></tr>
+  <tr><td>Fair treatment</td><td>Selection-rate gap between sexes at threshold 0.30</td><td>≤ 0.10 (hard gate)</td></tr>
+</table>
+
+<p><b>Baselines.</b> (1) The <i>prior</i> baseline predicts the base rate for everyone: ROC AUC 0.50, PR AUC 0.233. This
+is the floor. (2) The <i>legacy scorecard</i> has an estimated ROC AUC of about 0.68, which is the operational
+baseline to beat. (3) In the prototype, a <i>logistic regression on raw features</i> reaches ROC AUC 0.745 and PR AUC
+0.545, and gradient boosting reaches 0.747–0.751. The target of ≥ 0.75 is therefore realistic. The quality gate of
+≥ 0.70 blocks a regression without causing false alarms on normal run-to-run variation.</p>
+
+<p><b>Why these metrics.</b> Accuracy is excluded because a model that approves everyone scores 77% accuracy.
+ROC AUC measures ranking and is independent of the threshold, so it is the primary metric. PR AUC and recall reflect
+the minority class, which is where the losses are. The Brier score matters because the thresholds are applied to raw
+probabilities. The fairness gap is a <b>gate, not a report</b>: a model that improves AUC but widens the gap past 0.10
+is rejected.</p>
+
+<h2>4. High-level Architecture Design</h2>
+
+<figure>
+<svg viewBox="0 0 900 520" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Arial" font-size="12">
+  <defs>
+    <marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#44505c"/></marker>
+    <style>.b{fill:#fff;stroke:#44505c;stroke-width:1.3}.z{fill:#f3f6fa;stroke:#9aa7b4;stroke-dasharray:4 3}.t{font-weight:600}.l{stroke:#44505c;stroke-width:1.3;fill:none;marker-end:url(#a)}.s{font-size:10.5px;fill:#5b6470}</style>
+  </defs>
+  <!-- zones -->
+  <rect class="z" x="10" y="10" width="210" height="500" rx="8"/><text x="20" y="30" class="t">Sources</text>
+  <rect class="z" x="235" y="10" width="330" height="250" rx="8"/><text x="245" y="30" class="t">Offline: training pipeline (Airflow, weekly/monthly)</text>
+  <rect class="z" x="235" y="275" width="330" height="235" rx="8"/><text x="245" y="295" class="t">Online: serving</text>
+  <rect class="z" x="580" y="10" width="310" height="500" rx="8"/><text x="590" y="30" class="t">Registry, monitoring &amp; consumers</text>
+  <!-- sources -->
+  <rect class="b" x="25" y="50" width="180" height="46" rx="6"/><text x="35" y="70" class="t">Core banking DB</text><text x="35" y="86" class="s">limits, pay status, bills, payments</text>
+  <rect class="b" x="25" y="110" width="180" height="46" rx="6"/><text x="35" y="130" class="t">Application form</text><text x="35" y="146" class="s">demographics (consented)</text>
+  <rect class="b" x="25" y="170" width="180" height="46" rx="6"/><text x="35" y="190" class="t">CIC credit bureau</text><text x="35" y="206" class="s">external delinquency flags</text>
+  <rect class="b" x="25" y="230" width="180" height="46" rx="6"/><text x="35" y="250" class="t">Outcome labels</text><text x="35" y="266" class="s">default next month (30–60d lag)</text>
+  <rect class="b" x="25" y="330" width="180" height="56" rx="6"/><text x="35" y="350" class="t">Loan Origination System</text><text x="35" y="366" class="s">app, retail partners,</text><text x="35" y="379" class="s">branches</text>
+  <!-- offline -->
+  <rect class="b" x="250" y="45" width="140" height="40" rx="6"/><text x="260" y="70" class="t">1 Ingest + snapshot</text>
+  <rect class="b" x="410" y="45" width="140" height="40" rx="6"/><text x="420" y="70" class="t">2 Validate (3 levels)</text>
+  <rect class="b" x="250" y="105" width="140" height="40" rx="6"/><text x="260" y="130" class="t">3 Feature engineering</text>
+  <rect class="b" x="410" y="105" width="140" height="40" rx="6"/><text x="420" y="130" class="t">4 Train (MLflow)</text>
+  <rect class="b" x="250" y="165" width="140" height="40" rx="6"/><text x="260" y="190" class="t">5 Evaluate + slices</text>
+  <rect class="b" x="410" y="165" width="140" height="40" rx="6"/><text x="420" y="190" class="t">6 Quality gate</text>
+  <rect class="b" x="330" y="215" width="140" height="34" rx="6"/><text x="340" y="237" class="t">7 Register + alias</text>
+  <path class="l" d="M390,65 L408,65"/><path class="l" d="M480,85 L330,103"/><path class="l" d="M390,125 L408,125"/>
+  <path class="l" d="M480,145 L330,163"/><path class="l" d="M390,185 L408,185"/><path class="l" d="M480,205 L420,213"/>
+  <!-- online -->
+  <rect class="b" x="250" y="310" width="300" height="80" rx="6"/><text x="262" y="330" class="t">Scoring API (FastAPI, Docker, 2–6 replicas)</text>
+  <text x="262" y="348" class="s">Pydantic contract → sklearn Pipeline (derive → encode → model)</text>
+  <text x="262" y="363" class="s">decision rule (thresholds from config) · /predict /batch /explain</text>
+  <text x="262" y="378" class="s">/metrics · /monitoring (PSI window vs frozen reference)</text>
+  <rect class="b" x="250" y="410" width="140" height="44" rx="6"/><text x="260" y="430" class="t">Prediction log</text><text x="260" y="446" class="s">features, score, version</text>
+  <rect class="b" x="410" y="410" width="140" height="44" rx="6"/><text x="420" y="430" class="t">Fallback scorecard</text><text x="420" y="446" class="s">if model unavailable</text>
+  <path class="l" d="M300,390 L300,408"/>
+  <!-- right -->
+  <rect class="b" x="600" y="45" width="270" height="60" rx="6"/><text x="612" y="66" class="t">MLflow tracking + model registry</text><text x="612" y="83" class="s">runs, params, artifacts, @champion / @challenger</text><text x="612" y="97" class="s">validation report, feature list per version</text>
+  <rect class="b" x="600" y="130" width="270" height="44" rx="6"/><text x="612" y="150" class="t">CI/CD (GitHub Actions)</text><text x="612" y="166" class="s">tests → image → staging → prod (approval)</text>
+  <rect class="b" x="600" y="310" width="270" height="44" rx="6"/><text x="612" y="330" class="t">Prometheus + Alertmanager</text><text x="612" y="346" class="s">golden signals, drift, fairness alerts</text>
+  <rect class="b" x="600" y="370" width="270" height="44" rx="6"/><text x="612" y="390" class="t">Grafana dashboards</text><text x="612" y="406" class="s">service health · model behaviour</text>
+  <rect class="b" x="600" y="430" width="270" height="56" rx="6"/><text x="612" y="450" class="t">Consumers</text><text x="612" y="466" class="s">underwriters (review UI + reasons), risk managers,</text><text x="612" y="479" class="s">on-call engineers, compliance audit</text>
+  <!-- cross links -->
+  <path class="l" d="M205,73 L248,65"/><path class="l" d="M205,133 L248,70"/><path class="l" d="M205,193 L248,75"/><path class="l" d="M205,253 L248,80"/>
+  <path class="l" d="M470,232 L598,85"/>
+  <path class="l" d="M735,105 L735,128"/><path class="l" d="M600,160 L552,320"/>
+  <path class="l" d="M205,358 L248,350"/><path class="l" d="M550,340 L598,332"/><path class="l" d="M735,354 L735,368"/><path class="l" d="M735,414 L735,428"/>
+  <path class="l" d="M250,432 L140,300"/>
+  <text x="120" y="300" class="s">joined with labels</text>
+</svg>
+<figcaption>Figure 1. System architecture. The offline pipeline produces versioned, gated models; the online API serves the @champion version and exports monitoring signals. Prediction logs are joined with delayed labels to close the loop.</figcaption>
+</figure>
+
+<h3>4.1 Data flow</h3>
+<ol>
+  <li><b>Online.</b> The LOS sends an application to <code>POST /predict</code>. The schema validates it. The fitted
+  pipeline derives six features (utilisation, payment ratio, worst delay, months delayed, average bill, average
+  payment), encodes and scales them, and scores. The decision rule maps the score to an action. The response goes back
+  to the LOS, and the features, score and model version go to the prediction log and the in-memory drift window.</li>
+  <li><b>Monitoring.</b> Every 10 s Prometheus scrapes <code>/metrics</code>: request rate, errors and latency, the
+  score histogram, decision counts, PSI per feature against the <i>frozen training reference</i>, and selection rate by
+  group. Alert rules page on-call staff for service failures and notify the risk team about drift and fairness.</li>
+  <li><b>Offline.</b> Airflow runs the training DAG weekly, or on a drift alert: ingest a dated snapshot → validate →
+  engineer features → train (every run tracked in MLflow) → evaluate, including per-group slices → quality gate →
+  register. A model that passes the gate and beats the champion by ≥ 0.002 AUC becomes <code>@champion</code>; one that
+  passes but does not beat it becomes <code>@challenger</code>; one that fails is registered and tagged
+  <i>rejected</i>, which keeps an audit trail.</li>
+  <li><b>Feedback.</b> Outcomes are joined to the prediction log after 30–60 days. They become new training data and
+  also produce the lagging accuracy metrics that confirm or refute what the drift signals suggested.</li>
+</ol>
+
+<h3>4.2 Component description</h3>
+<table>
+  <tr><th style="width:20%">Component</th><th>Purpose and responsibility</th><th style="width:27%">Technologies considered (chosen in bold)</th></tr>
+  <tr><td>Data ingestion</td><td>Extract a dated, immutable snapshot of the training table; make the train/test split reproducible (seeded and stratified).</td><td><b>Python/pandas + Parquet</b>; Spark if volume grows; DVC for snapshot versioning</td></tr>
+  <tr><td>Data validation</td><td>Block training on broken data; attach the validation report to every run.</td><td><b>Custom three-level checks</b>; Great Expectations / Pandera as alternatives</td></tr>
+  <tr><td>Feature engineering</td><td>Domain ratios and counts <i>inside</i> the sklearn Pipeline, so that training and serving share one code path and cannot skew.</td><td><b>scikit-learn Pipeline + ColumnTransformer</b>; a feature store (Feast) is not needed yet</td></tr>
+  <tr><td>Training and tracking</td><td>Fit candidate models and log parameters, data summary, artifacts and environment.</td><td><b>scikit-learn (LogReg, RF, HistGradientBoosting)</b>, <b>MLflow</b>; XGBoost/LightGBM as options</td></tr>
+  <tr><td>Evaluation and gate</td><td>Compute aggregate and per-group metrics; apply the written promotion rule automatically.</td><td><b>Custom module</b> with thresholds held in config</td></tr>
+  <tr><td>Model registry</td><td>Version models; the aliases <code>@champion</code> and <code>@challenger</code> decide what is served.</td><td><b>MLflow Model Registry</b> (aliases, not the deprecated stages)</td></tr>
+  <tr><td>Orchestration</td><td>Schedule and retry the pipeline, branch on the gate, clean up.</td><td><b>Apache Airflow</b>; Prefect or Kubeflow as alternatives</td></tr>
+  <tr><td>Serving API</td><td>Low-latency scoring with an input contract, health and model info endpoints.</td><td><b>FastAPI + Uvicorn</b> in <b>Docker</b>; BentoML / KServe as alternatives</td></tr>
+  <tr><td>Explainability</td><td>Give per-decision reasons to underwriters and for adverse-action notices.</td><td><b>SHAP TreeExplainer</b></td></tr>
+  <tr><td>Monitoring</td><td>Golden signals, drift, fairness, alerting and dashboards as code.</td><td><b>Prometheus, Alertmanager, Grafana</b>; Evidently for offline drift reports</td></tr>
+  <tr><td>CI/CD</td><td>Tests, linting, image build, staged deployment with approval.</td><td><b>GitHub Actions</b>, <b>GHCR</b>, pre-commit</td></tr>
+</table>
+
+<h3>4.3 ML pipeline stages</h3>
+<table>
+  <tr><th style="width:18%">Stage</th><th>Input → Output</th><th>Key checks</th></tr>
+  <tr><td>Data ingestion</td><td>Core banking tables → dated snapshot, train/test split</td><td>Row count, snapshot hash logged</td></tr>
+  <tr><td>Preprocessing</td><td>Raw frame → validated frame and validation report</td><td>Schema, statistics and semantics; fail fast</td></tr>
+  <tr><td>Feature engineering</td><td>23 raw columns → 29 features, one-hot encoded and scaled</td><td>Returns a copy; division by zero produces NaN, which is then imputed (never inf)</td></tr>
+  <tr><td>Training</td><td>Features + labels → fitted Pipeline and MLflow run</td><td>Fixed seeds; library versions logged</td></tr>
+  <tr><td>Evaluation</td><td>Model + test split → metrics, group metrics</td><td>AUC, PR AUC, recall, Brier, fairness gap</td></tr>
+  <tr><td>Inference</td><td>Application JSON → probability, band, decision</td><td>422 for invalid input; latency SLO; drift window</td></tr>
+</table>
+
+<h2>5. Trade-off Analysis</h2>
+
+<h3>5.1 Accuracy vs latency (and explainability)</h3>
+<p>A large gradient-boosting ensemble, or a stack of models, might add 0.005–0.01 AUC. However, it costs latency and
+makes explanations harder. In the prototype, logistic regression with engineered features (ROC AUC 0.751) was at least
+as accurate as boosted trees (0.747–0.748) and scored in microseconds per row. <b>Decision:</b> serve a single
+Pipeline model that is either regularised logistic regression or a moderate HistGradientBoosting model (depth ≤ 8).
+The p95 budget is 100 ms. Explanations are computed on demand through a separate endpoint, so their cost (about
+10–100 ms) never slows down <code>/predict</code>.</p>
+
+<h3>5.2 Freshness vs cost</h3>
+<p>Retraining continuously or daily would track the population closely. However, labels arrive 30–60 days late, so
+daily retraining would mostly refit on the same labels at the cost of compute, validation and review. <b>Decision:</b>
+retrain on a schedule (weekly to monthly) and also when drift is significant (PSI ≥ 0.25 sustained for 15 minutes). Drift is
+monitored in real time, but only a gated retrain changes the model. The drift reference stays frozen to the training
+data so that slow drift remains visible.</p>
+
+<h3>5.3 Simplicity vs performance</h3>
+<p>An online feature store, streaming features and a multi-model ensemble could extract more signal, but each adds
+infrastructure the team has to operate. <b>Decision:</b> use a monolithic sklearn Pipeline artifact with feature
+derivation inside it, one stateless API and batch retraining. This removes training–serving skew by construction and
+keeps rollback to a single alias change. More complexity is added only if the lagging business metric shows that the
+gap to the target cannot be closed otherwise.</p>
+
+<h3>5.4 Automation vs control</h3>
+<p>Fully automatic promotion could deploy a model that is more accurate but unfair, or one trained on a broken
+extract. <b>Decision:</b> automate the <i>checks</i> but keep humans on the <i>thresholds</i>. The gate (AUC ≥ 0.70,
+PR AUC ≥ 0.45, fairness gap ≤ 0.10, where a missing metric fails) and the champion margin decide promotion; rejected
+models are still registered for audit; production deployment needs approval by a risk officer through a protected
+GitHub environment; business thresholds are configuration owned by risk management. The model never auto-approves
+when it is down.</p>
+
+<h3>5.5 Privacy vs personalisation</h3>
+<p>Adding more personal data, such as phone metadata, social data or precise location, would probably improve AUC
+but raises consent, legal and fairness risks under Decree 13/2023/ND-CP. <b>Decision:</b> use only
+credit-relevant behavioural data that was collected with consent. Sensitive attributes (sex, age) are held for
+<i>monitoring</i> fairness, and whether to drop them as model inputs is reviewed with compliance. Identifiers are
+hashed, and personal data never leaves the country. The model's AUC is accepted as the price of a defensible
+feature set.</p>
+
+<h3>5.6 Known risks</h3>
+<ul>
+  <li><b>Selective labels:</b> declined applicants never show outcomes, so the training data comes only from past
+  approvals. Mitigation: a small randomised review band, and reject-inference analysis.</li>
+  <li><b>Feedback loops and drift:</b> marketing campaigns change the applicant population (for example younger
+  customers with lower limits). This is mitigated by PSI per feature, score quantiles and decision-mix alerts.</li>
+  <li><b>Accuracy vs fairness:</b> the most accurate family (logistic regression) had the widest selection-rate gap
+  (0.054 against 0.028–0.037 for tree models). The gate makes this trade-off explicit rather than accidental.</li>
+</ul>
+
+<p class="small">References: Kästner, Le Goues &amp; Hilton (2024), <i>Machine Learning in Production</i>; Huyen (2022),
+<i>Designing Machine Learning Systems</i>; Sculley et al. (2015), <i>Hidden Technical Debt in ML Systems</i>;
+Yeh &amp; Lien (2009), UCI Default of Credit Card Clients; Government of Vietnam, Decree 13/2023/ND-CP on personal data
+protection.</p>
+
+</body>
+</html>
