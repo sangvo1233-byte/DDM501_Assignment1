@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="900" height="520" style="background:#fff" viewBox="0 0 900 520" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Arial" font-size="12">
+  <defs>
+    <marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#44505c"/></marker>
+    <style>.b{fill:#fff;stroke:#44505c;stroke-width:1.3}.z{fill:#f3f6fa;stroke:#9aa7b4;stroke-dasharray:4 3}.t{font-weight:600}.l{stroke:#44505c;stroke-width:1.3;fill:none;marker-end:url(#a)}.s{font-size:10.5px;fill:#5b6470}</style>
+  </defs>
+  <!-- zones -->
+  <rect class="z" x="10" y="10" width="210" height="500" rx="8"/><text x="20" y="30" class="t">Sources</text>
+  <rect class="z" x="235" y="10" width="330" height="250" rx="8"/><text x="245" y="30" class="t">Offline: training pipeline (Airflow, weekly/monthly)</text>
+  <rect class="z" x="235" y="275" width="330" height="235" rx="8"/><text x="245" y="295" class="t">Online: serving</text>
+  <rect class="z" x="580" y="10" width="310" height="500" rx="8"/><text x="590" y="30" class="t">Registry, monitoring &amp; consumers</text>
+  <!-- sources -->
+  <rect class="b" x="25" y="50" width="180" height="46" rx="6"/><text x="35" y="70" class="t">Core banking DB</text><text x="35" y="86" class="s">limits, pay status, bills, payments</text>
+  <rect class="b" x="25" y="110" width="180" height="46" rx="6"/><text x="35" y="130" class="t">Application form</text><text x="35" y="146" class="s">demographics (consented)</text>
+  <rect class="b" x="25" y="170" width="180" height="46" rx="6"/><text x="35" y="190" class="t">CIC credit bureau</text><text x="35" y="206" class="s">external delinquency flags</text>
+  <rect class="b" x="25" y="230" width="180" height="46" rx="6"/><text x="35" y="250" class="t">Outcome labels</text><text x="35" y="266" class="s">default next month (30–60d lag)</text>
+  <rect class="b" x="25" y="330" width="180" height="56" rx="6"/><text x="35" y="350" class="t">Loan Origination System</text><text x="35" y="366" class="s">app, retail partners,</text><text x="35" y="379" class="s">branches</text>
+  <!-- offline -->
+  <rect class="b" x="250" y="45" width="140" height="40" rx="6"/><text x="260" y="70" class="t">1 Ingest + snapshot</text>
+  <rect class="b" x="410" y="45" width="140" height="40" rx="6"/><text x="420" y="70" class="t">2 Validate (3 levels)</text>
+  <rect class="b" x="250" y="105" width="140" height="40" rx="6"/><text x="260" y="130" class="t">3 Feature engineering</text>
+  <rect class="b" x="410" y="105" width="140" height="40" rx="6"/><text x="420" y="130" class="t">4 Train (MLflow)</text>
+  <rect class="b" x="250" y="165" width="140" height="40" rx="6"/><text x="260" y="190" class="t">5 Evaluate + slices</text>
+  <rect class="b" x="410" y="165" width="140" height="40" rx="6"/><text x="420" y="190" class="t">6 Quality gate</text>
+  <rect class="b" x="330" y="215" width="140" height="34" rx="6"/><text x="340" y="237" class="t">7 Register + alias</text>
+  <path class="l" d="M390,65 L408,65"/><path class="l" d="M480,85 L330,103"/><path class="l" d="M390,125 L408,125"/>
+  <path class="l" d="M480,145 L330,163"/><path class="l" d="M390,185 L408,185"/><path class="l" d="M480,205 L420,213"/>
+  <!-- online -->
+  <rect class="b" x="250" y="310" width="300" height="80" rx="6"/><text x="262" y="330" class="t">Scoring API (FastAPI, Docker, 2–6 replicas)</text>
+  <text x="262" y="348" class="s">Pydantic contract → sklearn Pipeline</text>
+  <text x="262" y="363" class="s">decision rule (thresholds in config) · /predict /explain</text>
+  <text x="262" y="378" class="s">/metrics · /monitoring (PSI window vs frozen reference)</text>
+  <rect class="b" x="250" y="410" width="140" height="44" rx="6"/><text x="260" y="430" class="t">Prediction log</text><text x="260" y="446" class="s">features, score, version</text>
+  <rect class="b" x="410" y="410" width="140" height="44" rx="6"/><text x="420" y="430" class="t">Fallback scorecard</text><text x="420" y="446" class="s">if model unavailable</text>
+  <path class="l" d="M300,390 L300,408"/>
+  <!-- right -->
+  <rect class="b" x="600" y="45" width="270" height="60" rx="6"/><text x="612" y="66" class="t">MLflow tracking + model registry</text><text x="612" y="83" class="s">runs, params, artifacts, @champion / @challenger</text><text x="612" y="97" class="s">validation report, feature list per version</text>
+  <rect class="b" x="600" y="130" width="270" height="44" rx="6"/><text x="612" y="150" class="t">CI/CD (GitHub Actions)</text><text x="612" y="166" class="s">tests → image → staging → prod (approval)</text>
+  <rect class="b" x="600" y="310" width="270" height="44" rx="6"/><text x="612" y="330" class="t">Prometheus + Alertmanager</text><text x="612" y="346" class="s">golden signals, drift, fairness alerts</text>
+  <rect class="b" x="600" y="370" width="270" height="44" rx="6"/><text x="612" y="390" class="t">Grafana dashboards</text><text x="612" y="406" class="s">service health · model behaviour</text>
+  <rect class="b" x="600" y="430" width="270" height="56" rx="6"/><text x="612" y="450" class="t">Consumers</text><text x="612" y="466" class="s">underwriters (review UI + reasons), risk managers,</text><text x="612" y="479" class="s">on-call engineers, compliance audit</text>
+  <!-- cross links -->
+  <path class="l" d="M205,73 L248,65"/><path class="l" d="M205,133 L248,70"/><path class="l" d="M205,193 L248,75"/><path class="l" d="M205,253 L248,80"/>
+  <path class="l" d="M470,232 L598,85"/>
+  <path class="l" d="M735,105 L735,128"/><path class="l" d="M600,160 L552,320"/>
+  <path class="l" d="M205,358 L248,350"/><path class="l" d="M550,340 L598,332"/><path class="l" d="M735,354 L735,368"/><path class="l" d="M735,414 L735,428"/>
+  <path class="l" d="M250,432 L140,300"/>
+  <text x="120" y="300" class="s">joined with labels</text>
+</svg>
